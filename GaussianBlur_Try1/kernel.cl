@@ -26,7 +26,7 @@ __kernel void gaussian_blur(
     if (x >= width || y >= height)
         return;
 
-    int half = kernelSize / 2;
+    int radius = kernelSize / 2;
 
     /* Apply the 2D filter independently for each channel */
     for (int c = 0; c < bpp; c++)
@@ -38,8 +38,8 @@ __kernel void gaussian_blur(
             for (int kx = 0; kx < kernelSize; kx++)
             {
                 /* Clamp sample coordinates to the nearest valid pixel */
-                int sx = clamp(x + kx - half, 0, width  - 1);
-                int sy = clamp(y + ky - half, 0, height - 1);
+                int sx = clamp(x + kx - radius, 0, width  - 1);
+                int sy = clamp(y + ky - radius, 0, height - 1);
 
                 float pixelValue = (float)input[(sy * width + sx) * bpp + c];
                 acc += pixelValue * filterKernel[ky * kernelSize + kx];

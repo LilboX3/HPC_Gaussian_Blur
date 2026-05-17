@@ -122,15 +122,15 @@ static void printCompilerError(cl_program program, cl_device_id device)
 
 static void generateGaussianKernel(float* kernel, int kernelSize, float sigma)
 {
-    int half = kernelSize / 2;
+    int radius = kernelSize / 2;
     double sum = 0.0;
 
     for (int i = 0; i < kernelSize; i++)
     {
         for (int j = 0; j < kernelSize; j++)
         {
-            double x = i - half;
-            double y = j - half;
+            double x = i - radius;
+            double y = j - radius;
             double val = (1.0 / (2.0 * M_PI * sigma * sigma)) *
                          exp(-(x * x + y * y) / (2.0 * sigma * sigma));
             kernel[i * kernelSize + j] = (float)val;
