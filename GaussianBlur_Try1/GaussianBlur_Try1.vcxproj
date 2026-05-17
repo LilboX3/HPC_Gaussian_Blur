@@ -126,7 +126,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="cppTga\tga.cpp" />
     <ClCompile Include="GaussianBlur_Try1.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="cppTga\tga.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
