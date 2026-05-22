@@ -1,51 +1,39 @@
-/*
- * Gaussian blur kernel (simple single-pass 2D convolution).
- * Each work item computes exactly one output pixel.
- *
- * Arguments:
- *   input       - source image (row-major, bytesPerPixel channels)
- *   output      - destination image (same layout)
- *   width       - image width in pixels
- *   height      - image height in pixels
- *   bpp         - bytes per pixel (3 = RGB, 4 = RGBA)
- *   filterKernel- 1D array storing the (kernelSize x kernelSize) filter weights in row-major order
- *   kernelSize  - side length of the square filter (must be odd, 1..9)
- */
 __kernel void gaussian_blur(
-    __global const uchar* input,
-    __global       uchar* output,
-    int width,
-    int height,
-    int bpp,
-    __global const float* filterKernel,
-    int kernelSize)
+	__global const uchar* input,
+	__global uchar* output,
+	__global const float* filter,
+	const uint width,
+	const uint height,
+	const uint channels,
+	const uint filterSize)
 {
-    int x = (int)get_global_id(0);  /* column */
-    int y = (int)get_global_id(1);  /* row    */
+	const uint x = get_global_id(0);
+	const uint y = get_global_id(1);
+	const int radius = (int)(filterSize / 2);
 
-    if (x >= width || y >= height)
-        return;
+	if (x >= width || y >= height)
+	{
+		return;
+	}
 
-    int radius = kernelSize / 2;
+	const uint outputIndex = (y * width + x) * channels;
 
-    /* Apply the 2D filter independently for each channel */
-    for (int c = 0; c < bpp; c++)
-    {
-        float acc = 0.0f;
+	for (uint channel = 0; channel < channels; ++channel)
+	{
+		float sum = 0.0f;
 
-        for (int ky = 0; ky < kernelSize; ky++)
-        {
-            for (int kx = 0; kx < kernelSize; kx++)
-            {
-                /* Clamp sample coordinates to the nearest valid pixel */
-                int sx = clamp(x + kx - radius, 0, width  - 1);
-                int sy = clamp(y + ky - radius, 0, height - 1);
+		for (uint filterY = 0; filterY < filterSize; ++filterY)
+		{
+			for (uint filterX = 0; filterX < filterSize; ++filterX)
+			{
+				const int sampleX = clamp((int)x + (int)filterX - radius, 0, (int)width - 1);
+				const int sampleY = clamp((int)y + (int)filterY - radius, 0, (int)height - 1);
+				const uint sampleIndex = ((uint)sampleY * width + (uint)sampleX) * channels + channel;
+				const uint filterIndex = filterY * filterSize + filterX;
+				sum += (float)input[sampleIndex] * filter[filterIndex];
+			}
+		}
 
-                float pixelValue = (float)input[(sy * width + sx) * bpp + c];
-                acc += pixelValue * filterKernel[ky * kernelSize + kx];
-            }
-        }
-
-        output[(y * width + x) * bpp + c] = (uchar)clamp(acc, 0.0f, 255.0f);
-    }
+		output[outputIndex + channel] = (uchar)clamp((int)(sum + 0.5f), 0, 255);
+	}
 }
