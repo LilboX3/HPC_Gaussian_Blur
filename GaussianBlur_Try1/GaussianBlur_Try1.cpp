@@ -4,10 +4,25 @@
 #include <CL/cl.h>
 #elif __APPLE__
 #include <OpenCL/opencl.h>
+#else
+#include <CL/cl.h>
 #endif
 
+#include "cppTga/tga.h"
+
+#define _USE_MATH_DEFINES
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <vector>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 std::string cl_errorstring(cl_int err)
 {
@@ -98,35 +113,93 @@ void printCompilerError(cl_program program, cl_device_id device)
 
 	// print the log
 	printf("Build Error: %s\n", log);
+	free(log);
 }
 
-void printVector(int32_t* vector, unsigned int elementSize, const char* label)
+tga::TGAImage loadTgaImage(const std::string& fileName)
 {
-	printf("%s:\n", label);
-
-	for (unsigned int i = 0; i < elementSize; ++i)
+	tga::TGAImage image;
+	if (!tga::LoadTGA(&image, fileName.c_str()))
 	{
-		printf("%d ", vector[i]);
+		printf("Error: Could not load input image '%s'.\n", fileName.c_str());
+		exit(EXIT_FAILURE);
 	}
 
-	printf("\n");
+	return image;
+}
+
+void saveTgaImage(const std::string& fileName, const tga::TGAImage& image)
+{
+	if (!tga::saveTGA(image, fileName.c_str()))
+	{
+		printf("Error: Could not save output image '%s'.\n", fileName.c_str());
+		exit(EXIT_FAILURE);
+	}
+}
+
+std::vector<float> createGaussianFilter(unsigned int smooth_kernel_size, double sigma)
+{
+	if (smooth_kernel_size == 0 || smooth_kernel_size > 9 || smooth_kernel_size % 2 == 0)
+	{
+		printf("Error: Filter size must be odd and between 1 and 9.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	if (sigma <= 0.0)
+	{
+		printf("Error: Sigma must be greater than 0.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	std::vector<float> filter(static_cast<size_t>(smooth_kernel_size) * smooth_kernel_size);
+	double sum = 0.0;
+	unsigned int i, j;
+
+	for (i = 0; i < smooth_kernel_size; i++) {
+		for (j = 0; j < smooth_kernel_size; j++) {
+			double x = i - (smooth_kernel_size - 1) / 2.0;
+			double y = j - (smooth_kernel_size - 1) / 2.0;
+			double gauss = 1.0 / (2.0 * M_PI * std::pow(sigma, 2.0))
+				* std::exp(-(std::pow(x, 2) + std::pow(y, 2)) / (2 * std::pow(sigma, 2)));
+			filter[static_cast<size_t>(i) * smooth_kernel_size + j] = static_cast<float>(gauss);
+			sum += gauss;
+		}
+	}
+
+	for (i = 0; i < smooth_kernel_size; i++) {
+		for (j = 0; j < smooth_kernel_size; j++) {
+			filter[static_cast<size_t>(i) * smooth_kernel_size + j] =
+				static_cast<float>(filter[static_cast<size_t>(i) * smooth_kernel_size + j] / sum);
+		}
+	}
+
+	return filter;
 }
 
 int main(int argc, char** argv)
 {
-	// input and output arrays
-	const unsigned int elementSize = 10;
-	size_t dataSize = elementSize * sizeof(int32_t);
-	int32_t* vectorA = static_cast<int32_t*>(malloc(dataSize));
-	int32_t* vectorB = static_cast<int32_t*>(malloc(dataSize));
-	int32_t* vectorC = static_cast<int32_t*>(malloc(dataSize));
-
-	for (unsigned int i = 0; i < elementSize; ++i)
+	if (argc < 2)
 	{
-		vectorA[i] = static_cast<int32_t>(i);
-		vectorB[i] = static_cast<int32_t>(i);
+		printf("Usage: %s <input.tga> [output.tga] [filter_size] [sigma]\n", argv[0]);
+		return EXIT_FAILURE;
 	}
 
+	const std::string inputFileName = argv[1];
+	const std::string outputFileName = argc > 2 ? argv[2] : "blurred_output.tga";
+	const unsigned int filterSize = argc > 3 ? static_cast<unsigned int>(std::strtoul(argv[3], NULL, 10)) : 9;
+	const double sigma = argc > 4 ? std::strtod(argv[4], NULL) : 1.0;
+
+	tga::TGAImage inputImage = loadTgaImage(inputFileName);
+	tga::TGAImage outputImage = inputImage;
+	std::vector<float> gaussianFilter = createGaussianFilter(filterSize, sigma);
+	const unsigned int channels = inputImage.bpp / 8;
+
+	printf("Input image: %s (%ux%u, %u channels)\n", inputFileName.c_str(), inputImage.width, inputImage.height, channels);
+	printf("Output image: %s\n", outputFileName.c_str());
+	printf("Gaussian filter: %ux%u, sigma %.3f\n", filterSize, filterSize, sigma);
+
+	const size_t imageByteSize = inputImage.imageData.size() * sizeof(unsigned char);
+	const size_t filterByteSize = gaussianFilter.size() * sizeof(float);
 	// used for checking error status of api calls
 	cl_int status;
 
@@ -166,17 +239,17 @@ int main(int argc, char** argv)
 	cl_command_queue commandQueue = clCreateCommandQueue(context, device, 0, &status);
 	checkStatus(status);
 
-	// allocate two input and one output buffer for the three vectors
-	cl_mem bufferA = clCreateBuffer(context, CL_MEM_READ_ONLY, dataSize, NULL, &status);
+	// allocate two input and one output buffer
+	cl_mem inputBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, imageByteSize, NULL, &status);
 	checkStatus(status);
-	cl_mem bufferB = clCreateBuffer(context, CL_MEM_READ_ONLY, dataSize, NULL, &status);
+	cl_mem outputBuffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, imageByteSize, NULL, &status);
 	checkStatus(status);
-	cl_mem bufferC = clCreateBuffer(context, CL_MEM_WRITE_ONLY, dataSize, NULL, &status);
+	cl_mem filterBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, filterByteSize, NULL, &status);
 	checkStatus(status);
 
-	// write data from the input vectors to the buffers
-	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferA, CL_TRUE, 0, dataSize, vectorA, 0, NULL, NULL));
-	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferB, CL_TRUE, 0, dataSize, vectorB, 0, NULL, NULL));
+	// write data from the input to the buffers
+	checkStatus(clEnqueueWriteBuffer(commandQueue, inputBuffer, CL_TRUE, 0, imageByteSize, inputImage.imageData.data(), 0, NULL, NULL));
+	checkStatus(clEnqueueWriteBuffer(commandQueue, filterBuffer, CL_TRUE, 0, filterByteSize, gaussianFilter.data(), 0, NULL, NULL));
 
 	// read the kernel source
 	const char* kernelFileName = "kernel.cl";
@@ -204,13 +277,22 @@ int main(int argc, char** argv)
 	}
 
 	// create the vector addition kernel
-	cl_kernel kernel = clCreateKernel(program, "vector_add", &status);
+	cl_kernel kernel = clCreateKernel(program, "gaussian_blur", &status);
 	checkStatus(status);
 
+	const cl_uint width = inputImage.width;
+	const cl_uint height = inputImage.height;
+	const cl_uint channelCount = channels;
+	const cl_uint kernelSize = filterSize;
+
 	// set the kernel arguments
-	checkStatus(clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufferA));
-	checkStatus(clSetKernelArg(kernel, 1, sizeof(cl_mem), &bufferB));
-	checkStatus(clSetKernelArg(kernel, 2, sizeof(cl_mem), &bufferC));
+	checkStatus(clSetKernelArg(kernel, 0, sizeof(cl_mem), &inputBuffer));
+	checkStatus(clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputBuffer));
+	checkStatus(clSetKernelArg(kernel, 2, sizeof(cl_mem), &filterBuffer));
+	checkStatus(clSetKernelArg(kernel, 3, sizeof(cl_uint), &width));
+	checkStatus(clSetKernelArg(kernel, 4, sizeof(cl_uint), &height));
+	checkStatus(clSetKernelArg(kernel, 5, sizeof(cl_uint), &channelCount));
+	checkStatus(clSetKernelArg(kernel, 6, sizeof(cl_uint), &kernelSize));
 
 	// output device capabilities
 	size_t maxWorkGroupSize;
@@ -230,30 +312,20 @@ int main(int argc, char** argv)
 	free(maxWorkItemSizes);
 
 	// execute the kernel
-	// ndrange capabilites only need to be checked when we specify a local work group size manually
-	// in our case we provide NULL as local work group size, which means groups get formed automatically
-	size_t globalWorkSize = static_cast<size_t>(elementSize);
-	checkStatus(clEnqueueNDRangeKernel(commandQueue, kernel, 1, NULL, &globalWorkSize, NULL, 0, NULL, NULL));
+	size_t globalWorkSize[2];
+	globalWorkSize[0] = static_cast<size_t>(inputImage.width);
+	globalWorkSize[1] = static_cast<size_t>(inputImage.height);
+	checkStatus(clEnqueueNDRangeKernel(commandQueue, kernel, 2, NULL, globalWorkSize, NULL, 0, NULL, NULL));
 
 	// read the device output buffer to the host output array
-	checkStatus(clEnqueueReadBuffer(commandQueue, bufferC, CL_TRUE, 0, dataSize, vectorC, 0, NULL, NULL));
+	checkStatus(clEnqueueReadBuffer(commandQueue, outputBuffer, CL_TRUE, 0, imageByteSize, outputImage.imageData.data(), 0, NULL, NULL));
+	saveTgaImage(outputFileName, outputImage);
 
-	// output result
-	printVector(vectorA, elementSize, "Input A");
-	printVector(vectorB, elementSize, "Input B");
-	printVector(vectorC, elementSize, "Output C");
-
-	// release allocated resources
-	free(vectorC);
-	free(vectorB);
-	free(vectorA);
-
-	// release opencl objects
 	checkStatus(clReleaseKernel(kernel));
 	checkStatus(clReleaseProgram(program));
-	checkStatus(clReleaseMemObject(bufferC));
-	checkStatus(clReleaseMemObject(bufferB));
-	checkStatus(clReleaseMemObject(bufferA));
+	checkStatus(clReleaseMemObject(filterBuffer));
+	checkStatus(clReleaseMemObject(outputBuffer));
+	checkStatus(clReleaseMemObject(inputBuffer));
 	checkStatus(clReleaseCommandQueue(commandQueue));
 	checkStatus(clReleaseContext(context));
 
