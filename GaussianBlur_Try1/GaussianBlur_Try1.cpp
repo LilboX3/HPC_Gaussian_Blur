@@ -12,6 +12,7 @@
 
 #define _USE_MATH_DEFINES
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -139,9 +140,9 @@ void saveTgaImage(const std::string& fileName, const tga::TGAImage& image)
 
 std::vector<float> createGaussianFilter(unsigned int smooth_kernel_size, double sigma)
 {
-	if (smooth_kernel_size == 0 || smooth_kernel_size > 9 || smooth_kernel_size % 2 == 0)
+	if (smooth_kernel_size == 0 || smooth_kernel_size % 2 == 0)
 	{
-		printf("Error: Filter size must be odd and between 1 and 9.\n");
+		printf("Error: Filter size must be odd and greater than 0.\n");
 		exit(EXIT_FAILURE);
 	}
 
@@ -151,29 +152,57 @@ std::vector<float> createGaussianFilter(unsigned int smooth_kernel_size, double 
 		exit(EXIT_FAILURE);
 	}
 
-	std::vector<float> filter(static_cast<size_t>(smooth_kernel_size) * smooth_kernel_size);
+	std::vector<float> filter(smooth_kernel_size);
 	double sum = 0.0;
-	unsigned int i, j;
+	unsigned int i;
+	const int radius = static_cast<int>(smooth_kernel_size / 2);
 
 	for (i = 0; i < smooth_kernel_size; i++) {
-		for (j = 0; j < smooth_kernel_size; j++) {
-			double x = i - (smooth_kernel_size - 1) / 2.0;
-			double y = j - (smooth_kernel_size - 1) / 2.0;
-			double gauss = 1.0 / (2.0 * M_PI * std::pow(sigma, 2.0))
-				* std::exp(-(std::pow(x, 2) + std::pow(y, 2)) / (2 * std::pow(sigma, 2)));
-			filter[static_cast<size_t>(i) * smooth_kernel_size + j] = static_cast<float>(gauss);
-			sum += gauss;
-		}
+		double x = static_cast<double>(static_cast<int>(i) - radius);
+		double gauss = std::exp(-(x * x) / (2.0 * sigma * sigma));
+		filter[i] = static_cast<float>(gauss);
+		sum += gauss;
 	}
 
 	for (i = 0; i < smooth_kernel_size; i++) {
-		for (j = 0; j < smooth_kernel_size; j++) {
-			filter[static_cast<size_t>(i) * smooth_kernel_size + j] =
-				static_cast<float>(filter[static_cast<size_t>(i) * smooth_kernel_size + j] / sum);
-		}
+		filter[i] = static_cast<float>(filter[i] / sum);
 	}
 
 	return filter;
+}
+
+tga::TGAImage resizeImageNearestNeighbor(const tga::TGAImage& sourceImage, unsigned int targetWidth, unsigned int targetHeight)
+{
+	const unsigned int channels = sourceImage.bpp / 8;
+	tga::TGAImage resizedImage;
+	resizedImage.width = targetWidth;
+	resizedImage.height = targetHeight;
+	resizedImage.bpp = sourceImage.bpp;
+	resizedImage.type = sourceImage.type;
+	resizedImage.imageData.resize(static_cast<size_t>(targetWidth) * targetHeight * channels);
+
+	for (unsigned int y = 0; y < targetHeight; ++y)
+	{
+		const unsigned int sourceY = std::min(
+			static_cast<unsigned int>((static_cast<unsigned long long>(y) * sourceImage.height) / targetHeight),
+			sourceImage.height - 1);
+
+		for (unsigned int x = 0; x < targetWidth; ++x)
+		{
+			const unsigned int sourceX = std::min(
+				static_cast<unsigned int>((static_cast<unsigned long long>(x) * sourceImage.width) / targetWidth),
+				sourceImage.width - 1);
+			const size_t destinationIndex = (static_cast<size_t>(y) * targetWidth + x) * channels;
+			const size_t sourceIndex = (static_cast<size_t>(sourceY) * sourceImage.width + sourceX) * channels;
+
+			for (unsigned int channel = 0; channel < channels; ++channel)
+			{
+				resizedImage.imageData[destinationIndex + channel] = sourceImage.imageData[sourceIndex + channel];
+			}
+		}
+	}
+
+	return resizedImage;
 }
 
 int main(int argc, char** argv)
@@ -190,16 +219,13 @@ int main(int argc, char** argv)
 	const double sigma = argc > 4 ? std::strtod(argv[4], NULL) : 1.0;
 
 	tga::TGAImage inputImage = loadTgaImage(inputFileName);
-	tga::TGAImage outputImage = inputImage;
 	std::vector<float> gaussianFilter = createGaussianFilter(filterSize, sigma);
 	const unsigned int channels = inputImage.bpp / 8;
 
 	printf("Input image: %s (%ux%u, %u channels)\n", inputFileName.c_str(), inputImage.width, inputImage.height, channels);
 	printf("Output image: %s\n", outputFileName.c_str());
-	printf("Gaussian filter: %ux%u, sigma %.3f\n", filterSize, filterSize, sigma);
+	printf("Gaussian filter: 1x%u, sigma %.3f\n", filterSize, sigma);
 
-	const size_t imageByteSize = inputImage.imageData.size() * sizeof(unsigned char);
-	const size_t filterByteSize = gaussianFilter.size() * sizeof(float);
 	// used for checking error status of api calls
 	cl_int status;
 
@@ -239,18 +265,6 @@ int main(int argc, char** argv)
 	cl_command_queue commandQueue = clCreateCommandQueue(context, device, 0, &status);
 	checkStatus(status);
 
-	// allocate two input and one output buffer
-	cl_mem inputBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, imageByteSize, NULL, &status);
-	checkStatus(status);
-	cl_mem outputBuffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, imageByteSize, NULL, &status);
-	checkStatus(status);
-	cl_mem filterBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, filterByteSize, NULL, &status);
-	checkStatus(status);
-
-	// write data from the input to the buffers
-	checkStatus(clEnqueueWriteBuffer(commandQueue, inputBuffer, CL_TRUE, 0, imageByteSize, inputImage.imageData.data(), 0, NULL, NULL));
-	checkStatus(clEnqueueWriteBuffer(commandQueue, filterBuffer, CL_TRUE, 0, filterByteSize, gaussianFilter.data(), 0, NULL, NULL));
-
 	// read the kernel source
 	const char* kernelFileName = "kernel.cl";
 	std::ifstream ifs(kernelFileName);
@@ -280,24 +294,14 @@ int main(int argc, char** argv)
 	cl_kernel kernel = clCreateKernel(program, "gaussian_blur", &status);
 	checkStatus(status);
 
-	const cl_uint width = inputImage.width;
-	const cl_uint height = inputImage.height;
-	const cl_uint channelCount = channels;
-	const cl_uint kernelSize = filterSize;
-
-	// set the kernel arguments
-	checkStatus(clSetKernelArg(kernel, 0, sizeof(cl_mem), &inputBuffer));
-	checkStatus(clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputBuffer));
-	checkStatus(clSetKernelArg(kernel, 2, sizeof(cl_mem), &filterBuffer));
-	checkStatus(clSetKernelArg(kernel, 3, sizeof(cl_uint), &width));
-	checkStatus(clSetKernelArg(kernel, 4, sizeof(cl_uint), &height));
-	checkStatus(clSetKernelArg(kernel, 5, sizeof(cl_uint), &channelCount));
-	checkStatus(clSetKernelArg(kernel, 6, sizeof(cl_uint), &kernelSize));
-
 	// output device capabilities
 	size_t maxWorkGroupSize;
 	checkStatus(clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkGroupSize, NULL));
 	printf("Device Capabilities: Max work items in single group: %zu\n", maxWorkGroupSize);
+
+	size_t kernelMaxWorkGroupSize;
+	checkStatus(clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), &kernelMaxWorkGroupSize, NULL));
+	printf("Kernel Capabilities: Max work items in single group: %zu\n", kernelMaxWorkGroupSize);
 
 	cl_uint maxWorkItemDimensions;
 	checkStatus(clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS, sizeof(cl_uint), &maxWorkItemDimensions, NULL));
@@ -309,22 +313,131 @@ int main(int argc, char** argv)
 	for (cl_uint i = 0; i < maxWorkItemDimensions; ++i)
 		printf(" %u:%zu", i, maxWorkItemSizes[i]);
 	printf("\n");
+
+	cl_ulong localMemorySize;
+	checkStatus(clGetDeviceInfo(device, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(cl_ulong), &localMemorySize, NULL));
+	printf("Device Capabilities: Local memory size: %llu bytes\n", static_cast<unsigned long long>(localMemorySize));
+
+	const size_t effectiveMaxWorkGroupSize = std::min(maxWorkGroupSize, kernelMaxWorkGroupSize);
+	const size_t localPixelsCapacity = static_cast<size_t>(localMemorySize / (channels * sizeof(cl_uchar)));
+	const size_t rowWorkGroupLimit = std::min(effectiveMaxWorkGroupSize, std::min(maxWorkItemSizes[0], localPixelsCapacity));
+	const size_t columnWorkGroupLimit = std::min(effectiveMaxWorkGroupSize, std::min(maxWorkItemSizes[1], localPixelsCapacity));
+	printf("Derived limits: row work-group <= %zu, column work-group <= %zu\n", rowWorkGroupLimit, columnWorkGroupLimit);
 	free(maxWorkItemSizes);
 
-	// execute the kernel
+	if (rowWorkGroupLimit == 0 || columnWorkGroupLimit == 0)
+	{
+		printf("Error: Local memory is too small to cache even a single pixel per work-group.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	if (inputImage.width > rowWorkGroupLimit || inputImage.height > columnWorkGroupLimit)
+	{
+		const double rowScale = static_cast<double>(rowWorkGroupLimit) / inputImage.width;
+		const double columnScale = static_cast<double>(columnWorkGroupLimit) / inputImage.height;
+		const double scale = std::min(rowScale, columnScale);
+
+		if (scale <= 0.0)
+		{
+			printf("Error: Could not resize image to match device capabilities.\n");
+			exit(EXIT_FAILURE);
+		}
+
+		const unsigned int resizedWidth = std::max(1u, static_cast<unsigned int>(std::floor(inputImage.width * scale)));
+		const unsigned int resizedHeight = std::max(1u, static_cast<unsigned int>(std::floor(inputImage.height * scale)));
+		printf("Resizing input from %ux%u to %ux%u to satisfy row/column work-group limits.\n",
+			inputImage.width, inputImage.height, resizedWidth, resizedHeight);
+
+		inputImage = resizeImageNearestNeighbor(inputImage, resizedWidth, resizedHeight);
+	}
+
+	if (inputImage.width > rowWorkGroupLimit || inputImage.height > columnWorkGroupLimit)
+	{
+		printf("Error: Resulting work-group is still too big for this system.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	tga::TGAImage outputImage = inputImage;
+	const cl_uint width = inputImage.width;
+	const cl_uint height = inputImage.height;
+	const cl_uint channelCount = channels;
+	const cl_uint kernelSize = filterSize;
+	const size_t imageByteSize = inputImage.imageData.size() * sizeof(unsigned char);
+	const size_t filterByteSize = gaussianFilter.size() * sizeof(float);
+	const size_t horizontalLocalBytes = static_cast<size_t>(width) * channelCount * sizeof(cl_uchar);
+	const size_t verticalLocalBytes = static_cast<size_t>(height) * channelCount * sizeof(cl_uchar);
+
+	printf("Processing image size: %ux%u\n", width, height);
+	printf("Horizontal pass: local work-group = {%u, 1}, local memory = %zu bytes\n", width, horizontalLocalBytes);
+	printf("Vertical pass: local work-group = {1, %u}, local memory = %zu bytes\n", height, verticalLocalBytes);
+
+	// allocate two input and one output buffer
+	cl_mem inputBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, imageByteSize, NULL, &status);
+	checkStatus(status);
+	cl_mem intermediateBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE, imageByteSize, NULL, &status);
+	checkStatus(status);
+	cl_mem outputBuffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, imageByteSize, NULL, &status);
+	checkStatus(status);
+	cl_mem filterBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, filterByteSize, NULL, &status);
+	checkStatus(status);
+
+	// write data from the input to the buffers
+	checkStatus(clEnqueueWriteBuffer(commandQueue, inputBuffer, CL_TRUE, 0, imageByteSize, inputImage.imageData.data(), 0, NULL, NULL));
+	checkStatus(clEnqueueWriteBuffer(commandQueue, filterBuffer, CL_TRUE, 0, filterByteSize, gaussianFilter.data(), 0, NULL, NULL));
+
 	size_t globalWorkSize[2];
-	globalWorkSize[0] = static_cast<size_t>(inputImage.width);
-	globalWorkSize[1] = static_cast<size_t>(inputImage.height);
-	checkStatus(clEnqueueNDRangeKernel(commandQueue, kernel, 2, NULL, globalWorkSize, NULL, 0, NULL, NULL));
+	globalWorkSize[0] = static_cast<size_t>(width);
+	globalWorkSize[1] = static_cast<size_t>(height);
+
+	size_t horizontalLocalWorkSize[2];
+	horizontalLocalWorkSize[0] = static_cast<size_t>(width);
+	horizontalLocalWorkSize[1] = 1;
+
+	size_t verticalLocalWorkSize[2];
+	verticalLocalWorkSize[0] = 1;
+	verticalLocalWorkSize[1] = static_cast<size_t>(height);
+
+	cl_uint isHorizontal = 1;
+
+	// set the kernel arguments
+	checkStatus(clSetKernelArg(kernel, 0, sizeof(cl_mem), &inputBuffer));
+	checkStatus(clSetKernelArg(kernel, 1, sizeof(cl_mem), &intermediateBuffer));
+	checkStatus(clSetKernelArg(kernel, 2, sizeof(cl_mem), &filterBuffer));
+	checkStatus(clSetKernelArg(kernel, 3, sizeof(cl_uint), &width));
+	checkStatus(clSetKernelArg(kernel, 4, sizeof(cl_uint), &height));
+	checkStatus(clSetKernelArg(kernel, 5, sizeof(cl_uint), &channelCount));
+	checkStatus(clSetKernelArg(kernel, 6, sizeof(cl_uint), &kernelSize));
+	checkStatus(clSetKernelArg(kernel, 7, sizeof(cl_uint), &isHorizontal));
+	checkStatus(clSetKernelArg(kernel, 8, horizontalLocalBytes, NULL));
+
+	cl_event horizontalPassEvent;
+	checkStatus(clEnqueueNDRangeKernel(commandQueue, kernel, 2, NULL, globalWorkSize, horizontalLocalWorkSize, 0, NULL, &horizontalPassEvent));
+
+	isHorizontal = 0;
+	checkStatus(clSetKernelArg(kernel, 0, sizeof(cl_mem), &intermediateBuffer));
+	checkStatus(clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputBuffer));
+	checkStatus(clSetKernelArg(kernel, 2, sizeof(cl_mem), &filterBuffer));
+	checkStatus(clSetKernelArg(kernel, 3, sizeof(cl_uint), &width));
+	checkStatus(clSetKernelArg(kernel, 4, sizeof(cl_uint), &height));
+	checkStatus(clSetKernelArg(kernel, 5, sizeof(cl_uint), &channelCount));
+	checkStatus(clSetKernelArg(kernel, 6, sizeof(cl_uint), &kernelSize));
+	checkStatus(clSetKernelArg(kernel, 7, sizeof(cl_uint), &isHorizontal));
+	checkStatus(clSetKernelArg(kernel, 8, verticalLocalBytes, NULL));
+
+	cl_event verticalPassEvent;
+	checkStatus(clEnqueueNDRangeKernel(commandQueue, kernel, 2, NULL, globalWorkSize, verticalLocalWorkSize, 1, &horizontalPassEvent, &verticalPassEvent));
 
 	// read the device output buffer to the host output array
-	checkStatus(clEnqueueReadBuffer(commandQueue, outputBuffer, CL_TRUE, 0, imageByteSize, outputImage.imageData.data(), 0, NULL, NULL));
+	checkStatus(clEnqueueReadBuffer(commandQueue, outputBuffer, CL_TRUE, 0, imageByteSize, outputImage.imageData.data(), 1, &verticalPassEvent, NULL));
 	saveTgaImage(outputFileName, outputImage);
 
+	checkStatus(clReleaseEvent(verticalPassEvent));
+	checkStatus(clReleaseEvent(horizontalPassEvent));
 	checkStatus(clReleaseKernel(kernel));
 	checkStatus(clReleaseProgram(program));
 	checkStatus(clReleaseMemObject(filterBuffer));
 	checkStatus(clReleaseMemObject(outputBuffer));
+	checkStatus(clReleaseMemObject(intermediateBuffer));
 	checkStatus(clReleaseMemObject(inputBuffer));
 	checkStatus(clReleaseCommandQueue(commandQueue));
 	checkStatus(clReleaseContext(context));
