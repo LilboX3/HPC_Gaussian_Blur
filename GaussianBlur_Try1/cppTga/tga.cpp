@@ -25,7 +25,7 @@ bool tga::saveTGA(const TGAImage& image, const char * filename)
 	header[2] = image.height % 256;
 	header[3] = image.height / 256;
 	header[4] = image.bpp;
-	header[5] = image.bpp == 32 ? 8 : 0; //flag alpha depth and other flags
+	header[5] = image.bpp == 32 ? (8 | 0x20) : 0x20; // bit5=1: top-to-bottom origin
 
 	//add the headers
 	for (int i = 0; i < 12; ++i)
