@@ -297,6 +297,22 @@ int main(int argc, char** argv)
 	const cl_uint channelCount = channels;
 	const cl_uint kernelSize = filterSize;
 
+	//Horizontal: localWorkSize = { width, 1 }
+	if (width > maxWorkItemSizes[0])
+	{
+		printf("Error: Width (%u) exceeds max work items in dimension 0 (%zu)\n",
+			width, maxWorkItemSizes[0]);
+		exit(EXIT_FAILURE);
+	}
+
+	// ertical: localWorkSize = { 1, height }
+	if (height > maxWorkItemSizes[1])
+	{
+		printf("Error: Height (%u) exceeds max work items in dimension 1 (%zu)\n",
+			height, maxWorkItemSizes[1]);
+		exit(EXIT_FAILURE);
+	}
+
 	if ((size_t)width > maxWorkGroupSize)
 	{
 		printf("Error: Image width (%u) exceeds max work group size (%zu) for horizontal pass.\n", width, maxWorkGroupSize);
